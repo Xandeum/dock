@@ -3,9 +3,8 @@ use std::{str::FromStr, thread::sleep, time::Duration};
 use logger::init_logger;
 use prost::Message;
 use solana_sdk::{
-    message::{SanitizedMessage, SanitizedVersionedMessage},
     pubkey::Pubkey,
-    transaction::{SanitizedTransaction, SanitizedVersionedTransaction, VersionedTransaction},
+    transaction::{SanitizedVersionedTransaction, VersionedTransaction},
 };
 use types::{Opcode, Request};
 pub mod logger;
@@ -13,43 +12,56 @@ pub mod logger;
 mod types {
     include!(concat!(env!("OUT_DIR"), "/_.rs"));
 }
-
 const UDS_PATH: &str = "/var/run/xandeum/dock.sock";
-const TCP_ADDR: &str = "tcp://0.0.0.0:8080";
+const TCP_ADDR: &str = "tcp://167.86.82.28:8080";
+const XAND_SHILED_KEY: &str = "xSHLJPXU8QW3A9kGiRoL94bksJ7ZZPY4dUwJPAT8CVK";
 
 fn main() {
     init_logger().expect("Failed to initialize logger");
 
     let context = zmq::Context::new();
-    let socket = context.socket(zmq::SUB).unwrap();
+    let socket = context.socket(zmq::PULL).unwrap();
 
-    socket.connect(&format!("ipc://{}", UDS_PATH)).unwrap();
-    socket.set_subscribe(b"").unwrap();
+    socket.bind(&format!("ipc://{}", UDS_PATH)).unwrap();
+    //    socket.set_subscribe(b"").unwrap();
 
     let pub_socket = context.socket(zmq::PUB).unwrap();
     pub_socket
-        .bind(TCP_ADDR)
+        .connect(TCP_ADDR)
         .expect("Failed to bind PUB socket");
 
     log::info!("Receiving data from UDS socket ");
 
     loop {
-        match socket.recv_bytes(zmq::DONTWAIT) {
+        match socket.recv_bytes(0) {
             Ok(msg) => {
                 let tx: VersionedTransaction = bincode::deserialize(&msg).unwrap();
-
+                log::info!("received tx from Rpc : {:?}", msg);
                 let reqs = process_tx_to_proto_structure(tx);
+
+                if reqs.is_empty() {
+                    log::warn!("No request Found, Skipping");
+                }
 
                 for req in reqs {
                     let mut buf = Vec::new();
                     req.encode(&mut buf).unwrap();
 
-                    pub_socket.send(&buf, 0).expect("Failed to send via tcp")
+                    let res = pub_socket.send(&buf, 0);
+
+                    match res {
+                        Ok(()) => {
+                            log::debug!("Sent a request : {:?}", req);
+                        }
+                        Err(e) => {
+                            log::error!("Error Sending Req , Error : {}", e);
+                        }
+                    }
                 }
             }
             Err(zmq::Error::EAGAIN) => {
                 log::info!("No Message Received");
-                sleep(Duration::from_secs(5));
+                sleep(Duration::from_millis(100));
             }
             Err(e) => {
                 log::error!(
@@ -65,15 +77,11 @@ fn process_tx_to_proto_structure(tx: VersionedTransaction) -> Vec<Request> {
     let mut reqs: Vec<Request> = Vec::new();
     let sanitized_tx = SanitizedVersionedTransaction::try_new(tx).unwrap();
 
+    log::info!("Sanitized Transaction : {:?}", sanitized_tx);
     let msg = sanitized_tx.get_message();
 
-    let xand_shield_pubkey = Pubkey::from_str("5454").expect("Invalid XAND_SHIELD_PROGRAM_ID");
-
-    // let xand_shield_index = msg
-    //     .message
-    //     .static_account_keys()
-    //     .iter()
-    //     .position(|key| key == &xand_shield_pubkey);
+    let xand_shield_pubkey =
+        Pubkey::from_str(XAND_SHILED_KEY).expect("Invalid XAND_SHIELD_PROGRAM_ID");
 
     for (i, ix) in msg.instructions().iter().enumerate() {
         let pk = &msg.message.static_account_keys()[ix.program_id_index as usize];
@@ -91,14 +99,45 @@ fn process_tx_to_proto_structure(tx: VersionedTransaction) -> Vec<Request> {
                 })
                 .collect();
 
-            let data = ix.data.split_at(1);
+            if signers.is_empty() {
+                log::warn!(
+                    "Instruction {} has no signers, skipping request generation",
+                    i
+                );
+                continue;
+            }
 
-            let req = Request {
-                op: Opcode::Armageddon as i32,
-                pubkey: signers[0].to_bytes().to_vec(),
-                data: data.1.to_vec(),
-            };
-            reqs.push(req);
+            match ix.data.split_first() {
+                Some((op, data)) => match op {
+                    0 => {
+                        let req = Request {
+                            op: Opcode::Bigbang as i32,
+                            pubkey: signers[0].to_bytes().to_vec(),
+                            data: data.to_vec(),
+                        };
+                        reqs.push(req);
+                    }
+                    1 => {
+                        let req = Request {
+                            op: Opcode::Armageddon as i32,
+                            pubkey: signers[0].to_bytes().to_vec(),
+                            data: data.to_vec(),
+                        };
+                        reqs.push(req);
+                    }
+                    _ => {
+                        log::warn!("Other Instruction  are not supported yet, Skipping");
+                        continue;
+                    }
+                },
+                None => {
+                    log::warn!(
+                        "Instruction {} has empty data, skipping request generation",
+                        i
+                    );
+                    continue;
+                }
+            }
         }
     }
     reqs
