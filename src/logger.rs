@@ -1,9 +1,18 @@
 use std::sync::Once;
-
 use chrono::Local;
 use log::{Level, LevelFilter, Log, Metadata, Record, SetLoggerError};
 
-struct Logger;
+struct Logger {
+    version: String, // Add version field
+}
+
+impl Logger {
+    fn new(version: &str) -> Self {
+        Logger {
+            version: version.to_string(),
+        }
+    }
+}
 
 impl Log for Logger {
     fn enabled(&self, metadata: &Metadata) -> bool {
@@ -13,8 +22,9 @@ impl Log for Logger {
     fn log(&self, record: &Record) {
         if self.enabled(record.metadata()) {
             println!(
-                "[{}] {} - {}",
+                "[{}] [{}] {} - {}",
                 Local::now().format("%Y-%m-%d %H:%M:%S"),
+                self.version, 
                 record.level(),
                 record.args()
             );
@@ -24,13 +34,16 @@ impl Log for Logger {
     fn flush(&self) {}
 }
 
-static LOGGER: Logger = Logger;
+static mut LOGGER: Option<Logger> = None; 
 static INIT: Once = Once::new();
 
-pub fn init_logger() -> Result<(), SetLoggerError> {
+pub fn init_logger(version: &str) -> Result<(), SetLoggerError> {
     INIT.call_once(|| {
-        log::set_logger(&LOGGER).unwrap();
-        log::set_max_level(LevelFilter::Info);
+        unsafe {
+            LOGGER = Some(Logger::new(version));
+            log::set_logger(LOGGER.as_ref().unwrap()).unwrap();
+            log::set_max_level(LevelFilter::Info);
+        }
     });
     Ok(())
 }

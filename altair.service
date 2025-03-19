@@ -1,0 +1,18 @@
+[Unit]
+Description=Xandeum Dock Altair Service
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/cargo run --version altair
+WorkingDirectory=/root/dock
+Restart=always
+User=root
+Group=root
+Environment=NODE_ENV=production
+Environment=RUST_LOG=info
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=xandeum-dock-altair
+
+[Install]
+WantedBy=multi-user.target

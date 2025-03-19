@@ -1,23 +1,42 @@
-use std::{str::FromStr, thread::sleep, time::Duration};
-
 use logger::init_logger;
 use prost::Message;
 use solana_sdk::{
     pubkey::Pubkey,
     transaction::{SanitizedVersionedTransaction, VersionedTransaction},
 };
+use std::env;
+use std::{str::FromStr, thread::sleep, time::Duration};
 use types::{Opcode, Request};
 pub mod logger;
 
 mod types {
     include!(concat!(env!("OUT_DIR"), "/_.rs"));
 }
-const UDS_PATH: &str = "/var/run/xandeum/dock.sock";
+const UDS_PATH: &str = "/var/run/dock.sock";
 const TCP_ADDR: &str = "tcp://167.86.82.28:8080";
 const XAND_SHILED_KEY: &str = "xSHLJPXU8QW3A9kGiRoL94bksJ7ZZPY4dUwJPAT8CVK";
 
 fn main() {
-    init_logger().expect("Failed to initialize logger");
+    let args: Vec<String> = env::args().collect();
+    let version_name = if args.len() > 2 && args[1] == "--version" {
+        match args[2].as_str() {
+            "vega" => "Vega",
+            "altair" => "Altair",
+            _ => {
+                println!(
+                    "Invalid version. Use --version vega or --version altair. Defaulting to Vega."
+                );
+                "Vega"
+            }
+        }
+    } else {
+        println!(
+            "No version specified. Use --version vega or --version altair. Defaulting to Vega."
+        );
+        "Vega"
+    };
+
+    init_logger(version_name).expect("Failed to initialize logger");
 
     let context = zmq::Context::new();
     let socket = context.socket(zmq::PULL).unwrap();
