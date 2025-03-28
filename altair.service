@@ -3,11 +3,10 @@ Description=Xandeum Dock Altair Service
 After=network.target
 
 [Service]
-ExecStart=/usr/bin/cargo run --version altair
-WorkingDirectory=/root/dock
+ExecStart=/usr/bin/xandeum-dock --version altair
+WorkingDirectory=/home/sol/xand/dock
 Restart=always
-User=root
-Group=root
+User=sol
 Environment=NODE_ENV=production
 Environment=RUST_LOG=info
 StandardOutput=syslog
@@ -16,3 +15,8 @@ SyslogIdentifier=xandeum-dock-altair
 
 [Install]
 WantedBy=multi-user.target
+
+
+
+
+

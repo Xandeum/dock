@@ -1,10 +1,12 @@
+use log::info;
 use logger::init_logger;
 use prost::Message;
 use solana_sdk::{
     pubkey::Pubkey,
     transaction::{SanitizedVersionedTransaction, VersionedTransaction},
 };
-use std::env;
+use tokio::{net::UdpSocket, runtime::Runtime};
+use std::{env, net::Ipv4Addr, thread};
 use std::{str::FromStr, thread::sleep, time::Duration};
 use types::{Opcode, Request};
 pub mod logger;
@@ -12,8 +14,14 @@ pub mod logger;
 mod types {
     include!(concat!(env!("OUT_DIR"), "/_.rs"));
 }
-const UDS_PATH: &str = "/var/run/dock.sock";
-const TCP_ADDR: &str = "tcp://167.86.82.28:8080";
+const PULL_UDS_PATH: &str = "/var/run/dock.sock";
+const PUSH_UDS_PATH: &str = "/var/run/push.sock";
+const TCP_PUSH_ADDR: &str = "tcp://167.86.82.28:8080";
+
+const LOCAL_INTERFACE: &str = "0.0.0.0";
+const UDP_PORT: u16 = 5500;
+const MULTICAST_ADDR: &str = "tcp://167.86.82.28";
+
 const XAND_SHILED_KEY: &str = "xSHLJPXU8QW3A9kGiRoL94bksJ7ZZPY4dUwJPAT8CVK";
 
 fn main() {
@@ -39,20 +47,83 @@ fn main() {
     init_logger(version_name).expect("Failed to initialize logger");
 
     let context = zmq::Context::new();
-    let socket = context.socket(zmq::PULL).unwrap();
 
-    socket.bind(&format!("ipc://{}", UDS_PATH)).unwrap();
-    //    socket.set_subscribe(b"").unwrap();
+    let uds_pull_socket = context.socket(zmq::PULL).unwrap();
+    uds_pull_socket
+        .bind(&format!("ipc://{}", PULL_UDS_PATH))
+        .unwrap();
 
-    let pub_socket = context.socket(zmq::PUB).unwrap();
-    pub_socket
-        .connect(TCP_ADDR)
+    let tcp_push_socket = context.socket(zmq::PUSH).unwrap();
+    tcp_push_socket
+        .connect(TCP_PUSH_ADDR)
         .expect("Failed to bind PUB socket");
 
-    log::info!("Receiving data from UDS socket ");
+    let uds_push_socket = context.socket(zmq::PULL).unwrap();
+    uds_pull_socket
+        .bind(&format!("ipc://{}", PUSH_UDS_PATH))
+        .unwrap();
+
+    let tcp_pull_socket = match context.socket(zmq::PULL) {
+        Ok(socket) => socket,
+        Err(e) => {
+            log::error!("Failed to create TCP PULL socket: {:?}", e);
+            return;
+        }
+    };
+
+
+    thread::spawn(move || {
+        let rt = Runtime::new().expect("Failed to create Tokio runtime");
+
+        rt.block_on(async move {
+            info!("Starting the UDP Multicast Listener");
+
+            // Create UDP socket
+            let udp_socket = match UdpSocket::bind((LOCAL_INTERFACE, UDP_PORT)).await {
+                Ok(sock) => {
+                    info!("UDP socket bound to {}:{}", LOCAL_INTERFACE, UDP_PORT);
+                    sock
+                }
+                Err(e) => {
+                    log::error!("Failed to bind UDP socket: {:?}", e);
+                    return;
+                }
+            };
+
+            let multicast_addr: Ipv4Addr = MULTICAST_ADDR.parse().expect("Invalid multicast address");
+            let local_ip: Ipv4Addr = LOCAL_INTERFACE.parse().expect("Invalid local interface IP");
+
+            if let Err(e) = udp_socket.join_multicast_v4(multicast_addr, local_ip) {
+                log::error!("Failed to join multicast group {}: {:?}", MULTICAST_ADDR, e);
+                return;
+            }
+
+            info!("Joined multicast group: {}", MULTICAST_ADDR);
+
+            let mut buf = [0u8; 1024];
+
+            loop {
+                match udp_socket.recv_from(&mut buf).await {
+                    Ok((len, addr)) => {
+                        let data = &buf[..len];
+                        info!("Received {} bytes from {}: {:?}", len, addr, data);
+
+                        match uds_push_socket.send(data, 0) {
+                            Ok(()) => info!("Forwarded data from UDP to UDS PUSH socket"),
+                            Err(e) => log::error!("Failed to forward to UDS PUSH socket: {:?}", e),
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("Error receiving from UDP socket: {:?}", e);
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                }
+            }
+        });
+    });
 
     loop {
-        match socket.recv_bytes(0) {
+        match uds_pull_socket.recv_bytes(0) {
             Ok(msg) => {
                 let tx: VersionedTransaction = bincode::deserialize(&msg).unwrap();
                 log::info!("received tx from Rpc : {:?}", msg);
@@ -66,7 +137,7 @@ fn main() {
                     let mut buf = Vec::new();
                     req.encode(&mut buf).unwrap();
 
-                    let res = pub_socket.send(&buf, 0);
+                    let res = tcp_push_socket.send(&buf, 0);
 
                     match res {
                         Ok(()) => {

@@ -3,11 +3,10 @@ Description=Xandeum Dock Vega Service
 After=network.target
 
 [Service]
-ExecStart=/usr/bin/cargo run --version vega
-WorkingDirectory=/root/dock
+ExecStart=/usr/bin/xandeum-dock --version vega
+WorkingDirectory=/home/sol/xand/dock
 Restart=always
-User=root
-Group=root
+User=sol
 Environment=NODE_ENV=production
 Environment=RUST_LOG=info
 StandardOutput=syslog
@@ -16,3 +15,8 @@ SyslogIdentifier=xandeum-dock-vega
 
 [Install]
 WantedBy=multi-user.target
+
+
+
+
+
