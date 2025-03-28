@@ -5,22 +5,25 @@ use solana_sdk::{
     pubkey::Pubkey,
     transaction::{SanitizedVersionedTransaction, VersionedTransaction},
 };
-use tokio::{net::UdpSocket, runtime::Runtime};
 use std::{env, net::Ipv4Addr, thread};
 use std::{str::FromStr, thread::sleep, time::Duration};
+use tokio::{net::UdpSocket, runtime::Runtime};
 use types::{Opcode, Request};
+use zmq::DONTWAIT;
 pub mod logger;
 
 mod types {
     include!(concat!(env!("OUT_DIR"), "/_.rs"));
 }
-const PULL_UDS_PATH: &str = "/var/run/dock.sock";
-const PUSH_UDS_PATH: &str = "/var/run/push.sock";
-const TCP_PUSH_ADDR: &str = "tcp://167.86.82.28:8080";
+// const PULL_UDS_PATH: &str = "/tmp/dock.sock";
+// const PUSH_UDS_PATH: &str = "/tmp/push.sock";
+const TCP_PUSH_ADDR: &str = "tcp://65.108.233.175:8080";
+const TCP_PULL_ADDR: &str = "tcp://65.108.233.175:8081";
 
-const LOCAL_INTERFACE: &str = "0.0.0.0";
-const UDP_PORT: u16 = 5500;
-const MULTICAST_ADDR: &str = "tcp://167.86.82.28";
+// const LOCAL_INTERFACE: &str = "0.0.0.0";
+// // const LOCAL_INTERFACE: &str = "65.108.233.175";
+// const UDP_PORT: u16 = 8081;
+// const MULTICAST_ADDR: &str = "239.1.1.1";
 
 const XAND_SHILED_KEY: &str = "xSHLJPXU8QW3A9kGiRoL94bksJ7ZZPY4dUwJPAT8CVK";
 
@@ -46,11 +49,24 @@ fn main() {
 
     init_logger(version_name).expect("Failed to initialize logger");
 
+    let push_uds_path = match version_name {
+        "Vega" => "var/run/xandeum/vega_pull.sock",
+        "Altair" => "var/run/xandeum/altair_pull.sock",
+        _ => unreachable!(),
+    };
+
+    let pull_uds_path = match version_name {
+        "Vega" => "var/run/xandeum/vega.sock",
+        "Altair" => "var/run/xandeum/altair.sock",
+        _ => unreachable!(),
+    };
+
+    log::info!("Pull uds path : {}", pull_uds_path);
     let context = zmq::Context::new();
 
     let uds_pull_socket = context.socket(zmq::PULL).unwrap();
     uds_pull_socket
-        .bind(&format!("ipc://{}", PULL_UDS_PATH))
+        .connect(&format!("ipc://{}", pull_uds_path))
         .unwrap();
 
     let tcp_push_socket = context.socket(zmq::PUSH).unwrap();
@@ -58,19 +74,17 @@ fn main() {
         .connect(TCP_PUSH_ADDR)
         .expect("Failed to bind PUB socket");
 
-    let uds_push_socket = context.socket(zmq::PULL).unwrap();
+    let uds_push_socket = context.socket(zmq::PUSH).unwrap();
     uds_pull_socket
-        .bind(&format!("ipc://{}", PUSH_UDS_PATH))
+        .connect(&format!("ipc://{}", push_uds_path))
         .unwrap();
 
-    let tcp_pull_socket = match context.socket(zmq::PULL) {
-        Ok(socket) => socket,
-        Err(e) => {
-            log::error!("Failed to create TCP PULL socket: {:?}", e);
-            return;
-        }
-    };
+    let tcp_pull_socket = context.socket(zmq::XSUB).unwrap();
+    tcp_pull_socket
+        .connect(TCP_PULL_ADDR)
+        .expect("Failed to bind PUB socket");
 
+    tcp_pull_socket.send(b"\x01" as &[u8], 0).unwrap();
 
     thread::spawn(move || {
         let rt = Runtime::new().expect("Failed to create Tokio runtime");
@@ -79,36 +93,35 @@ fn main() {
             info!("Starting the UDP Multicast Listener");
 
             // Create UDP socket
-            let udp_socket = match UdpSocket::bind((LOCAL_INTERFACE, UDP_PORT)).await {
-                Ok(sock) => {
-                    info!("UDP socket bound to {}:{}", LOCAL_INTERFACE, UDP_PORT);
-                    sock
-                }
-                Err(e) => {
-                    log::error!("Failed to bind UDP socket: {:?}", e);
-                    return;
-                }
-            };
+            // let udp_socket = match UdpSocket::((LOCAL_INTERFACE, UDP_PORT)).await {
+            //     Ok(sock) => {
+            //         info!("UDP socket bound to {}:{}", LOCAL_INTERFACE, UDP_PORT);
+            //         sock
+            //     }
+            //     Err(e) => {
+            //         log::error!("Failed to bind UDP socket: {:?}", e);
+            //         return;
+            //     }
+            // };
 
-            let multicast_addr: Ipv4Addr = MULTICAST_ADDR.parse().expect("Invalid multicast address");
-            let local_ip: Ipv4Addr = LOCAL_INTERFACE.parse().expect("Invalid local interface IP");
+            // let multicast_addr: Ipv4Addr = MULTICAST_ADDR.parse().expect("Invalid multicast address");
+            // let local_ip: Ipv4Addr = LOCAL_INTERFACE.parse().expect("Invalid local interface IP");
 
-            if let Err(e) = udp_socket.join_multicast_v4(multicast_addr, local_ip) {
-                log::error!("Failed to join multicast group {}: {:?}", MULTICAST_ADDR, e);
-                return;
-            }
+            // if let Err(e) = udp_socket.join_multicast_v4(multicast_addr, local_ip) {
+            //     log::error!("Failed to join multicast group {}: {:?}", MULTICAST_ADDR, e);
+            //     return;
+            // }
 
-            info!("Joined multicast group: {}", MULTICAST_ADDR);
+            // info!("Joined multicast group: {}", MULTICAST_ADDR);
 
-            let mut buf = [0u8; 1024];
+            // let mut buf = [0u8; 1024];
 
             loop {
-                match udp_socket.recv_from(&mut buf).await {
-                    Ok((len, addr)) => {
-                        let data = &buf[..len];
-                        info!("Received {} bytes from {}: {:?}", len, addr, data);
+                match tcp_pull_socket.recv_bytes(0) {
+                    Ok(msg) => {
+                        info!("Received bytes from Atlas : {:?}", msg);
 
-                        match uds_push_socket.send(data, 0) {
+                        match uds_push_socket.send(msg, 0) {
                             Ok(()) => info!("Forwarded data from UDP to UDS PUSH socket"),
                             Err(e) => log::error!("Failed to forward to UDS PUSH socket: {:?}", e),
                         }
@@ -151,7 +164,7 @@ fn main() {
             }
             Err(zmq::Error::EAGAIN) => {
                 log::info!("No Message Received");
-                sleep(Duration::from_millis(100));
+                sleep(Duration::from_millis(500));
             }
             Err(e) => {
                 log::error!(
@@ -165,10 +178,19 @@ fn main() {
 
 fn process_tx_to_proto_structure(tx: VersionedTransaction) -> Vec<Request> {
     let mut reqs: Vec<Request> = Vec::new();
-    let sanitized_tx = SanitizedVersionedTransaction::try_new(tx).unwrap();
+    let sanitized_tx = SanitizedVersionedTransaction::try_new(tx.clone()).unwrap();
 
     log::info!("Sanitized Transaction : {:?}", sanitized_tx);
     let msg = sanitized_tx.get_message();
+
+    let tx_hash = tx
+        .signatures
+        .get(0)
+        .map(|sig| sig.to_string()) // Convert to base58 string
+        .unwrap_or_else(|| {
+            log::warn!("Transaction has no signatures, using default");
+            "no-signature".to_string()
+        });
 
     let xand_shield_pubkey =
         Pubkey::from_str(XAND_SHILED_KEY).expect("Invalid XAND_SHIELD_PROGRAM_ID");
@@ -198,30 +220,24 @@ fn process_tx_to_proto_structure(tx: VersionedTransaction) -> Vec<Request> {
             }
 
             match ix.data.split_first() {
-                Some((op, data)) => match op {
-                    0 => {
-                        let req = Request {
-                            op: Opcode::Bigbang as i32,
-                            pubkey: signers[0].to_bytes().to_vec(),
-                            data: data.to_vec(),
-                            signature: "hi".to_string()
-                        };
-                        reqs.push(req);
-                    }
-                    1 => {
-                        let req = Request {
-                            op: Opcode::Armageddon as i32,
-                            pubkey: signers[0].to_bytes().to_vec(),
-                            data: data.to_vec(),
-                            signature: "hi".to_string()
-                        };
-                        reqs.push(req);
-                    }
-                    _ => {
-                        log::warn!("Other Instruction  are not supported yet, Skipping");
-                        continue;
-                    }
-                },
+                Some((op, data)) => {
+                    let opcode = match op {
+                        0 => Opcode::Bigbang,
+                        1 => Opcode::Armageddon,
+                        _ => {
+                            log::warn!("Other Instructions are not supported yet, Skipping");
+                            continue;
+                        }
+                    };
+
+                    let req = Request {
+                        op: opcode as i32,
+                        pubkey: signers[0].to_bytes().to_vec(),
+                        data: data.to_vec(),
+                        signature: tx_hash.clone(),
+                    };
+                    reqs.push(req);
+                }
                 None => {
                     log::warn!(
                         "Instruction {} has empty data, skipping request generation",

@@ -3,7 +3,7 @@ use chrono::Local;
 use log::{Level, LevelFilter, Log, Metadata, Record, SetLoggerError};
 
 struct Logger {
-    version: String, // Add version field
+    version: String,
 }
 
 impl Logger {
