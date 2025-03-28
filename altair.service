@@ -4,7 +4,6 @@ After=network.target
 
 [Service]
 ExecStart=/usr/bin/xandeum-dock --version altair
-WorkingDirectory=/home/sol/xand/dock
 Restart=always
 User=sol
 Environment=NODE_ENV=production
