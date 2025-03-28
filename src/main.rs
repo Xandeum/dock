@@ -204,6 +204,7 @@ fn process_tx_to_proto_structure(tx: VersionedTransaction) -> Vec<Request> {
                             op: Opcode::Bigbang as i32,
                             pubkey: signers[0].to_bytes().to_vec(),
                             data: data.to_vec(),
+                            signature: "hi".to_string()
                         };
                         reqs.push(req);
                     }
@@ -212,6 +213,7 @@ fn process_tx_to_proto_structure(tx: VersionedTransaction) -> Vec<Request> {
                             op: Opcode::Armageddon as i32,
                             pubkey: signers[0].to_bytes().to_vec(),
                             data: data.to_vec(),
+                            signature: "hi".to_string()
                         };
                         reqs.push(req);
                     }
