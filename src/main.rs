@@ -50,32 +50,26 @@ fn main() {
     init_logger(version_name).expect("Failed to initialize logger");
 
     let push_uds_path = match version_name {
-        "Vega" => "var/run/xandeum/vega_pull.sock",
-        "Altair" => "var/run/xandeum/altair_pull.sock",
+        "Vega" => "/var/run/xandeum/vega_pull.sock",
+        "Altair" => "/var/run/xandeum/altair_pull.sock",
         _ => unreachable!(),
     };
 
     let pull_uds_path = match version_name {
-        "Vega" => "var/run/xandeum/vega.sock",
-        "Altair" => "var/run/xandeum/altair.sock",
+        "Vega" => "/var/run/xandeum/vega.sock",
+        "Altair" => "/var/run/xandeum/altair.sock",
         _ => unreachable!(),
     };
 
-    log::info!("Pull uds path : {}", pull_uds_path);
+    log::info!("UDS Pull Socket path : {}", pull_uds_path);
+    log::info!("UDS Push Socket path : {}", push_uds_path);
+    log::info!("Tcp Pull ip  : {}", TCP_PULL_ADDR);
+    log::info!("Tcp Push ip : {}", TCP_PUSH_ADDR);
+
     let context = zmq::Context::new();
 
-    let uds_pull_socket = context.socket(zmq::PULL).unwrap();
-    uds_pull_socket
-        .connect(&format!("ipc://{}", pull_uds_path))
-        .unwrap();
-
-    let tcp_push_socket = context.socket(zmq::PUSH).unwrap();
-    tcp_push_socket
-        .connect(TCP_PUSH_ADDR)
-        .expect("Failed to bind PUB socket");
-
     let uds_push_socket = context.socket(zmq::PUSH).unwrap();
-    uds_pull_socket
+    uds_push_socket
         .connect(&format!("ipc://{}", push_uds_path))
         .unwrap();
 
@@ -87,53 +81,34 @@ fn main() {
     tcp_pull_socket.send(b"\x01" as &[u8], 0).unwrap();
 
     thread::spawn(move || {
-        let rt = Runtime::new().expect("Failed to create Tokio runtime");
+        info!("Starting the UDP Multicast Listener");
 
-        rt.block_on(async move {
-            info!("Starting the UDP Multicast Listener");
+        loop {
+            match tcp_pull_socket.recv_bytes(0) {
+                Ok(msg) => {
+                    info!("Received bytes from Atlas : {:?}", msg);
 
-            // Create UDP socket
-            // let udp_socket = match UdpSocket::((LOCAL_INTERFACE, UDP_PORT)).await {
-            //     Ok(sock) => {
-            //         info!("UDP socket bound to {}:{}", LOCAL_INTERFACE, UDP_PORT);
-            //         sock
-            //     }
-            //     Err(e) => {
-            //         log::error!("Failed to bind UDP socket: {:?}", e);
-            //         return;
-            //     }
-            // };
-
-            // let multicast_addr: Ipv4Addr = MULTICAST_ADDR.parse().expect("Invalid multicast address");
-            // let local_ip: Ipv4Addr = LOCAL_INTERFACE.parse().expect("Invalid local interface IP");
-
-            // if let Err(e) = udp_socket.join_multicast_v4(multicast_addr, local_ip) {
-            //     log::error!("Failed to join multicast group {}: {:?}", MULTICAST_ADDR, e);
-            //     return;
-            // }
-
-            // info!("Joined multicast group: {}", MULTICAST_ADDR);
-
-            // let mut buf = [0u8; 1024];
-
-            loop {
-                match tcp_pull_socket.recv_bytes(0) {
-                    Ok(msg) => {
-                        info!("Received bytes from Atlas : {:?}", msg);
-
-                        match uds_push_socket.send(msg, 0) {
-                            Ok(()) => info!("Forwarded data from UDP to UDS PUSH socket"),
-                            Err(e) => log::error!("Failed to forward to UDS PUSH socket: {:?}", e),
-                        }
-                    }
-                    Err(e) => {
-                        log::error!("Error receiving from UDP socket: {:?}", e);
-                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    match uds_push_socket.send(msg, 0) {
+                        Ok(()) => info!("Forwarded data from UDP to UDS PUSH socket"),
+                        Err(e) => log::error!("Failed to forward to UDS PUSH socket: {:?}", e),
                     }
                 }
+                Err(e) => {
+                    log::error!("Error receiving from UDP socket: {:?}", e);
+                }
             }
-        });
+        }
     });
+
+    let uds_pull_socket = context.socket(zmq::PULL).unwrap();
+    uds_pull_socket
+        .connect(&format!("ipc://{}", pull_uds_path))
+        .unwrap();
+
+    let tcp_push_socket = context.socket(zmq::PUSH).unwrap();
+    tcp_push_socket
+        .connect(TCP_PUSH_ADDR)
+        .expect("Failed to bind PUB socket");
 
     loop {
         match uds_pull_socket.recv_bytes(0) {
