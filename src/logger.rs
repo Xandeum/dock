@@ -1,7 +1,6 @@
-use std::sync::Once;
 use chrono::Local;
 use log::{Level, LevelFilter, Log, Metadata, Record, SetLoggerError};
-
+use std::sync::OnceLock;
 struct Logger {
     version: String,
 }
@@ -34,16 +33,12 @@ impl Log for Logger {
     fn flush(&self) {}
 }
 
-static mut LOGGER: Option<Logger> = None; 
-static INIT: Once = Once::new();
+static LOGGER: OnceLock<Logger> = OnceLock::new();
 
 pub fn init_logger(version: &str) -> Result<(), SetLoggerError> {
-    INIT.call_once(|| {
-        unsafe {
-            LOGGER = Some(Logger::new(version));
-            log::set_logger(LOGGER.as_ref().unwrap()).unwrap();
-            log::set_max_level(LevelFilter::Info);
-        }
-    });
+    let logger = Logger::new(version);
+    LOGGER.set(logger).ok(); 
+    log::set_logger(LOGGER.get().unwrap())?;
+    log::set_max_level(LevelFilter::Info);
     Ok(())
 }
