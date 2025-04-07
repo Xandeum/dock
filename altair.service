@@ -3,7 +3,7 @@ Description=Xandeum Dock Altair Service
 After=network.target
 
 [Service]
-ExecStart=/usr/bin/xandeum-dock --version altair
+ExecStart=/usr/bin/xandeum-dock --version altair --tcp-push atlas.devnet.xandeum.com:3001 --tcp-pull atlas.devnet.xandeum.com:4001
 Restart=always
 User=sol
 Environment=NODE_ENV=production

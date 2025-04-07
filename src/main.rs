@@ -5,7 +5,7 @@ use solana_sdk::{
     pubkey::Pubkey,
     transaction::{SanitizedVersionedTransaction, VersionedTransaction},
 };
-use std::{env, fs, path::Path, thread};
+use std::{env, thread};
 use std::{str::FromStr, thread::sleep, time::Duration};
 use types::{Opcode, Request};
 pub mod logger;
@@ -14,29 +14,58 @@ mod types {
     include!(concat!(env!("OUT_DIR"), "/_.rs"));
 }
 
-const TCP_PUSH_ADDR: &str = "tcp://65.108.233.175:8080";
-const TCP_PULL_ADDR: &str = "tcp://65.108.233.175:8081";
 const XAND_SHILED_KEY: &str = "xSHLJPXU8QW3A9kGiRoL94bksJ7ZZPY4dUwJPAT8CVK";
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let version_name = if args.len() > 2 && args[1] == "--version" {
-        match args[2].as_str() {
-            "vega" => "Vega",
-            "altair" => "Altair",
+
+    let mut version_name: Option<&str> = None;
+    let mut tcp_push_addr: Option<String> = None;
+    let mut tcp_pull_addr: Option<String> = None;
+
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--version" if i + 1 < args.len() => {
+                version_name = match args[i + 1].to_lowercase().as_str() {
+                    "vega" => Some("Vega"),
+                    "altair" => Some("Altair"),
+                    _ => {
+                        eprintln!("Invalid version: {}", args[i + 1]);
+                        print_usage_and_exit();
+                    }
+                };
+                i += 2;
+            }
+            "--tcp-push" if i + 1 < args.len() => {
+                tcp_push_addr = Some(format!("tcp://{}", args[i + 1]));
+                i += 2;
+            }
+            "--tcp-pull" if i + 1 < args.len() => {
+                tcp_pull_addr = Some(format!("tcp://{}", args[i + 1]));
+                i += 2;
+            }
             _ => {
-                println!(
-                    "Invalid version. Use --version vega or --version altair. Defaulting to Vega."
-                );
-                "Vega"
+                eprintln!("Unknown or incomplete argument: {}", args[i]);
+                print_usage_and_exit();
             }
         }
-    } else {
-        println!(
-            "No version specified. Use --version vega or --version altair. Defaulting to Vega."
-        );
-        "Vega"
-    };
+    }
+
+    let version_name = version_name.unwrap_or_else(|| {
+        eprintln!("Missing --version argument.");
+        print_usage_and_exit();
+    });
+
+    let tcp_push_addr = tcp_push_addr.unwrap_or_else(|| {
+        eprintln!("Missing --tcp-push argument.");
+        print_usage_and_exit();
+    });
+
+    let tcp_pull_addr = tcp_pull_addr.unwrap_or_else(|| {
+        eprintln!("Missing --tcp-pull argument.");
+        print_usage_and_exit();
+    });
 
     init_logger(version_name).expect("Failed to initialize logger");
 
@@ -54,15 +83,8 @@ fn main() {
 
     info!("UDS Pull Socket path : {}", pull_uds_path);
     info!("UDS Push Socket path : {}", push_uds_path);
-    info!("Tcp Pull ip  : {}", TCP_PULL_ADDR);
-    info!("Tcp Push ip : {}", TCP_PUSH_ADDR);
-
-    let dir_path = Path::new("/var/run/xandeum");
-    // Creating The xandeum directory for Uds sockets
-    if !dir_path.exists() {
-        // Create the directory and any missing parent directories
-        fs::create_dir_all(dir_path).expect("Failed to create /var/run/xandeum directory");
-    }
+    info!("Tcp Pull ip  : {}", tcp_pull_addr);
+    info!("Tcp Push ip : {}", tcp_push_addr);
 
     let context = zmq::Context::new();
 
@@ -74,7 +96,7 @@ fn main() {
 
     let tcp_pull_socket = context.socket(zmq::XSUB).unwrap();
     tcp_pull_socket
-        .connect(TCP_PULL_ADDR)
+        .connect(&tcp_pull_addr)
         .expect("Failed to bind PUB socket");
 
     tcp_pull_socket.send(b"\x01" as &[u8], 0).unwrap();
@@ -107,7 +129,7 @@ fn main() {
 
     let tcp_push_socket = context.socket(zmq::PUSH).unwrap();
     tcp_push_socket
-        .connect(TCP_PUSH_ADDR)
+        .connect(&tcp_push_addr)
         .expect("Failed to bind PUB socket");
 
     // Listening to Xandeum agave for incoming Xtransactions and forwarding
@@ -225,4 +247,12 @@ fn process_tx_to_proto_structure(tx: VersionedTransaction) -> Vec<Request> {
         }
     }
     reqs
+}
+
+
+fn print_usage_and_exit() -> ! {
+    eprintln!(
+        "Usage: <binary> --version <vega|altair> --tcp-push <ip:port> --tcp-pull <ip:port>"
+    );
+    std::process::exit(1);
 }
