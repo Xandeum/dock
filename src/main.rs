@@ -69,17 +69,9 @@ fn main() {
 
     init_logger(version_name).expect("Failed to initialize logger");
 
-    let push_uds_path = match version_name {
-        "Vega" => "/var/run/xandeum/vega_pull.sock",
-        "Altair" => "/var/run/xandeum/altair_pull.sock",
-        _ => unreachable!(),
-    };
+    let push_uds_path = "/var/run/xandeum/fromdock.sock";
 
-    let pull_uds_path = match version_name {
-        "Vega" => "/var/run/xandeum/vega.sock",
-        "Altair" => "/var/run/xandeum/altair.sock",
-        _ => unreachable!(),
-    };
+    let pull_uds_path = "/var/run/xandeum/todock.sock";
 
     info!("UDS Pull Socket path : {}", pull_uds_path);
     info!("UDS Push Socket path : {}", push_uds_path);
