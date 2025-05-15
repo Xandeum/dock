@@ -1,3 +1,4 @@
+use bincode::Error;
 use log::{debug, error, info, warn};
 use logger::init_logger;
 use prost::Message;
@@ -129,9 +130,8 @@ fn main() {
     loop {
         match uds_pull_socket.recv_bytes(0) {
             Ok(msg) => {
-                let tx: VersionedTransaction = bincode::deserialize(&msg).unwrap();
-                debug!("Received XTransaction from Rpc : {:?}", msg);
-                let reqs = process_tx_to_proto_structure(tx);
+
+                let reqs = deserialize_requests(msg);
 
                 if reqs.is_empty() {
                     warn!("No request Found, Skipping");
@@ -215,6 +215,14 @@ fn process_tx_to_proto_structure(tx: VersionedTransaction) -> Vec<Request> {
                     let opcode = match op {
                         0 => Opcode::Bigbang,
                         1 => Opcode::Armageddon,
+                        2 => Opcode::Openrw,
+                        3 => Opcode::Peek,
+                        4 => Opcode::Poke,
+                        5 => Opcode::Rm,
+                        6 => Opcode::Mkdir,
+                        7 => Opcode::Rmdir,
+                        8 => Opcode::Rename,
+                        9 => Opcode::Copy,
                         _ => {
                             warn!("Other Instructions are not supported yet, Skipping");
                             continue;
@@ -241,10 +249,31 @@ fn process_tx_to_proto_structure(tx: VersionedTransaction) -> Vec<Request> {
     reqs
 }
 
-
 fn print_usage_and_exit() -> ! {
-    eprintln!(
-        "Usage: <binary> --version <vega|altair> --tcp-push <ip:port> --tcp-pull <ip:port>"
-    );
+    eprintln!("Usage: <binary> --version <vega|altair> --tcp-push <ip:port> --tcp-pull <ip:port>");
     std::process::exit(1);
+}
+
+fn deserialize_requests(msg: Vec<u8>) -> Vec<Request> {
+    let tx = bincode::deserialize(&msg);
+
+    let reqs = match tx {
+        Ok(tx) => {
+            let reqs = process_tx_to_proto_structure(tx);
+            reqs
+        }
+        Err(_) => match Request::decode(&*msg) {
+            Ok(r) => {
+                vec![r]
+            }
+            Err(e) => {
+                error!("Deserialization failed as both Tx and Request: {}", e);
+                vec![]
+            }
+        },
+    };
+
+    debug!("Received XTransaction/Request from Rpc : {:?}", msg);
+
+    reqs
 }
