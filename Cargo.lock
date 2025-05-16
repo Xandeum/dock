@@ -3632,6 +3632,7 @@ dependencies = [
  "log",
  "prost",
  "prost-build",
+ "serde",
  "solana-sdk",
  "zmq",
 ]

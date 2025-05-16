@@ -130,8 +130,9 @@ fn main() {
     loop {
         match uds_pull_socket.recv_bytes(0) {
             Ok(msg) => {
-
                 let reqs = deserialize_requests(msg);
+
+                info!("Request Received : {:?} ",reqs);
 
                 if reqs.is_empty() {
                     warn!("No request Found, Skipping");
@@ -255,25 +256,17 @@ fn print_usage_and_exit() -> ! {
 }
 
 fn deserialize_requests(msg: Vec<u8>) -> Vec<Request> {
-    let tx = bincode::deserialize(&msg);
+    if let Ok(tx) = bincode::deserialize(&msg) {
+        return process_tx_to_proto_structure(tx);
+    }
 
-    let reqs = match tx {
-        Ok(tx) => {
-            let reqs = process_tx_to_proto_structure(tx);
-            reqs
+    match bincode::deserialize::<Request>(&msg) {
+        Ok(r) => {
+            vec![r]
         }
-        Err(_) => match Request::decode(&*msg) {
-            Ok(r) => {
-                vec![r]
-            }
-            Err(e) => {
-                error!("Deserialization failed as both Tx and Request: {}", e);
-                vec![]
-            }
-        },
-    };
-
-    debug!("Received XTransaction/Request from Rpc : {:?}", msg);
-
-    reqs
+        Err(e) => {
+            error!("Deserialization failed as both Tx and Request: {}", e);
+            vec![]
+        }
+    }
 }
