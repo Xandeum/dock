@@ -7,7 +7,7 @@ ExecStart=/usr/bin/xandeum-dock --version altair --tcp-push atlas.devnet.xandeum
 Restart=always
 User=sol
 Environment=NODE_ENV=production
-Environment=RUST_LOG=info
+Environment=RUST_LOG=debug
 StandardOutput=syslog
 StandardError=syslog
 SyslogIdentifier=xandeum-dock-altair
