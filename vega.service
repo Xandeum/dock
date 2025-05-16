@@ -3,7 +3,7 @@ Description=Xandeum Dock Vega Service
 After=network.target
 
 [Service]
-ExecStart=/usr/bin/xandeum-dock --version vega --tcp-push atlas.devnet.xandeum.com:3001 --tcp-pull atlas.devnet.xandeum.com:4001
+ExecStart=/usr/bin/xandeum-dock --version vega --tcp-push atlas.trynet.xandeum.com:3001 --tcp-pull atlas.trynet.xandeum.com:4001
 Restart=always
 User=sol
 Environment=NODE_ENV=production
