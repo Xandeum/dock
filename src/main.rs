@@ -1,9 +1,9 @@
-use bincode::Error;
 use log::{debug, error, info, warn};
 use logger::init_logger;
 use prost::Message;
 use solana_sdk::{
     pubkey::Pubkey,
+    sanitize::SanitizeError,
     transaction::{SanitizedVersionedTransaction, VersionedTransaction},
 };
 use std::{env, thread};
@@ -169,9 +169,9 @@ fn main() {
 }
 
 /// To Validate and process the XTransaction to a Request format
-fn process_tx_to_proto_structure(tx: VersionedTransaction) -> Vec<Request> {
+fn process_tx_to_proto_structure(tx: VersionedTransaction) -> Result<Vec<Request>, SanitizeError> {
     let mut reqs: Vec<Request> = Vec::new();
-    let sanitized_tx = SanitizedVersionedTransaction::try_new(tx.clone()).unwrap();
+    let sanitized_tx = SanitizedVersionedTransaction::try_new(tx.clone())?;
 
     debug!("Sanitized Transaction : {:?}", sanitized_tx);
     let msg = sanitized_tx.get_message();
@@ -247,7 +247,7 @@ fn process_tx_to_proto_structure(tx: VersionedTransaction) -> Vec<Request> {
             }
         }
     }
-    reqs
+    Ok(reqs)
 }
 
 fn print_usage_and_exit() -> ! {
@@ -257,7 +257,9 @@ fn print_usage_and_exit() -> ! {
 
 fn deserialize_requests(msg: Vec<u8>) -> Vec<Request> {
     if let Ok(tx) = bincode::deserialize(&msg) {
-        return process_tx_to_proto_structure(tx);
+        if let Ok(reqs) = process_tx_to_proto_structure(tx) {
+            return reqs;
+        }
     }
 
     match bincode::deserialize::<Request>(&msg) {
