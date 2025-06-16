@@ -3,6 +3,7 @@ use logger::init_logger;
 use prost::Message;
 use solana_sdk::{
     pubkey::Pubkey,
+    sanitize::SanitizeError,
     transaction::{SanitizedVersionedTransaction, VersionedTransaction},
 };
 use std::{env, thread};
@@ -129,9 +130,9 @@ fn main() {
     loop {
         match uds_pull_socket.recv_bytes(0) {
             Ok(msg) => {
-                let tx: VersionedTransaction = bincode::deserialize(&msg).unwrap();
-                debug!("Received XTransaction from Rpc : {:?}", msg);
-                let reqs = process_tx_to_proto_structure(tx);
+                let reqs = deserialize_requests(msg);
+
+                info!("Request Received : {:?} ",reqs);
 
                 if reqs.is_empty() {
                     warn!("No request Found, Skipping");
@@ -168,9 +169,9 @@ fn main() {
 }
 
 /// To Validate and process the XTransaction to a Request format
-fn process_tx_to_proto_structure(tx: VersionedTransaction) -> Vec<Request> {
+fn process_tx_to_proto_structure(tx: VersionedTransaction) -> Result<Vec<Request>, SanitizeError> {
     let mut reqs: Vec<Request> = Vec::new();
-    let sanitized_tx = SanitizedVersionedTransaction::try_new(tx.clone()).unwrap();
+    let sanitized_tx = SanitizedVersionedTransaction::try_new(tx.clone())?;
 
     debug!("Sanitized Transaction : {:?}", sanitized_tx);
     let msg = sanitized_tx.get_message();
@@ -215,6 +216,15 @@ fn process_tx_to_proto_structure(tx: VersionedTransaction) -> Vec<Request> {
                     let opcode = match op {
                         0 => Opcode::Bigbang,
                         1 => Opcode::Armageddon,
+                        2 => Opcode::Openrw,
+                        3 => Opcode::Peek,
+                        4 => Opcode::Poke,
+                        5 => Opcode::Rm,
+                        6 => Opcode::Mkdir,
+                        7 => Opcode::Rmdir,
+                        8 => Opcode::Rename,
+                        9 => Opcode::Copy,
+                        13 => Opcode::Move,
                         _ => {
                             warn!("Other Instructions are not supported yet, Skipping");
                             continue;
@@ -238,13 +248,28 @@ fn process_tx_to_proto_structure(tx: VersionedTransaction) -> Vec<Request> {
             }
         }
     }
-    reqs
+    Ok(reqs)
 }
 
-
 fn print_usage_and_exit() -> ! {
-    eprintln!(
-        "Usage: <binary> --version <vega|altair> --tcp-push <ip:port> --tcp-pull <ip:port>"
-    );
+    eprintln!("Usage: <binary> --version <vega|altair> --tcp-push <ip:port> --tcp-pull <ip:port>");
     std::process::exit(1);
+}
+
+fn deserialize_requests(msg: Vec<u8>) -> Vec<Request> {
+    if let Ok(tx) = bincode::deserialize(&msg) {
+        if let Ok(reqs) = process_tx_to_proto_structure(tx) {
+            return reqs;
+        }
+    }
+
+    match bincode::deserialize::<Request>(&msg) {
+        Ok(r) => {
+            vec![r]
+        }
+        Err(e) => {
+            error!("Deserialization failed as both Tx and Request: {}", e);
+            vec![]
+        }
+    }
 }
