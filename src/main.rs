@@ -1,17 +1,20 @@
 use log::{debug, error, info, warn};
 use logger::init_logger;
 use prost::Message;
+use protos::{Opcode, Request};
 use solana_sdk::{
     pubkey::Pubkey,
     sanitize::SanitizeError,
     transaction::{SanitizedVersionedTransaction, VersionedTransaction},
 };
-use std::{env, thread};
+use std::{env, net::IpAddr, thread};
 use std::{str::FromStr, thread::sleep, time::Duration};
-use types::{Opcode, Request};
+
+use crate::protos::{response::Response, ResponseWrapper};
+
 pub mod logger;
 
-mod types {
+mod protos {
     include!(concat!(env!("OUT_DIR"), "/_.rs"));
 }
 
@@ -79,6 +82,21 @@ fn main() {
     info!("Tcp Pull ip  : {}", tcp_pull_addr);
     info!("Tcp Push ip : {}", tcp_push_addr);
 
+    let ip = local_ip_address::local_ip().unwrap();
+
+    info!("ip address : {:?}", ip);
+
+    let mut ip_bytes = [0u8; 16];
+
+    match ip {
+        IpAddr::V4(v4) => {
+            ip_bytes[..4].copy_from_slice(&v4.octets());
+        }
+        IpAddr::V6(v6) => {
+            ip_bytes.copy_from_slice(&v6.octets());
+        }
+    }
+
     let context = zmq::Context::new();
 
     // Creating zmq sockets for the Back channel
@@ -102,7 +120,63 @@ fn main() {
                 Ok(msg) => {
                     debug!("Received Data from Atlas : {:?}", msg);
 
-                    match uds_push_socket.send(msg, 0) {
+                    // Extracting IP address from the Response buffer
+                    let (ip_prefix, req_bytes) = msg.split_at(16);
+                    let ip_address = if ip_prefix[4..] == [0; 12] {
+                        // It's IPv4
+                        IpAddr::V4(std::net::Ipv4Addr::new(
+                            ip_prefix[0],
+                            ip_prefix[1],
+                            ip_prefix[2],
+                            ip_prefix[3],
+                        ))
+                    } else {
+                        // It's IPv6
+                        let mut octets = [0u8; 16];
+                        octets.copy_from_slice(ip_prefix);
+                        IpAddr::V6(std::net::Ipv6Addr::from(octets))
+                    };
+
+                    // Checking if the The Response is for a RPC request or a transaction
+                    match ResponseWrapper::decode(req_bytes) {
+                        Ok(wrapper) => {
+                            let response = match wrapper.response {
+                                Some(ref resp) => resp.clone(),
+                                None => {
+                                    error!(
+                                        "Received empty Response in ResponseWrapper: id={}",
+                                        wrapper.id
+                                    );
+                                    continue;
+                                }
+                            };
+
+                            match response.response {
+                                // If the response is for a RPC request and it is not originated from these docks/rpc
+                                // the it should be discarded.Since Each RPC will have their own Request counter
+                                // Request originated from other RPC will have different request number which could be
+                                // higher from this rpc. If the response for that request is stored in this rpc then
+                                // it will act as a poison response and it will provide false results in the future
+                                // for that request number
+                                Some(Response::Exists(_))
+                                | Some(Response::ListDir(_))
+                                | Some(Response::Metadata(_)) => {
+                                    if ip != ip_address {
+                                        info!("Received a RPC request originated from different RPC, discarding");
+                                        continue;
+                                    }
+                                }
+                                Some(Response::Tx(_)) => {}
+                                None => {}
+                            }
+                        }
+                        Err(e) => {
+                            error!("Failed to decode ResponseWrapper: {:?}", e);
+                            debug!("Raw message: {:?}", msg);
+                        }
+                    }
+
+                    match uds_push_socket.send(req_bytes, 0) {
                         Ok(()) => debug!("Forwarded data from Atlas to UDS PUSH socket"),
                         Err(e) => error!("Failed to forward to UDS PUSH socket: {:?}", e),
                     }
@@ -132,7 +206,7 @@ fn main() {
             Ok(msg) => {
                 let reqs = deserialize_requests(msg);
 
-                info!("Request Received : {:?} ",reqs);
+                info!("Request Received : {:?} ", reqs);
 
                 if reqs.is_empty() {
                     warn!("No request Found, Skipping");
@@ -142,7 +216,17 @@ fn main() {
                     let mut buf = Vec::new();
                     req.encode(&mut buf).unwrap();
 
-                    let res = tcp_push_socket.send(&buf, 0);
+                    // Encoding first 16 bytes id buffer with Ipaddress so When it receives
+                    // Response from Atlas We Receive The IP.
+                    // This is needed For identifying RPC requests and their responses
+                    // If the RPC request is originated from These Docks/RPC Then and only then
+                    // It's response should be sent to the RPC else discarded
+
+                    let mut final_buf = Vec::with_capacity(16 + buf.len());
+                    final_buf.extend_from_slice(&ip_bytes);
+                    final_buf.extend_from_slice(&buf);
+
+                    let res = tcp_push_socket.send(&final_buf, 0);
 
                     match res {
                         Ok(()) => {
