@@ -9,6 +9,8 @@ use solana_sdk::{
 };
 use std::{env, net::IpAddr, thread};
 use std::{str::FromStr, thread::sleep, time::Duration};
+use crossbeam_channel::{bounded, Receiver, Sender};
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
 use crate::protos::{response::Response, ResponseWrapper};
 
@@ -26,6 +28,7 @@ fn main() {
     let mut version_name: Option<&str> = None;
     let mut tcp_push_addr: Option<String> = None;
     let mut tcp_pull_addr: Option<String> = None;
+    let mut num_workers: usize = 4; // Default to 4 workers
 
     let mut i = 1;
     while i < args.len() {
@@ -47,6 +50,16 @@ fn main() {
             }
             "--tcp-pull" if i + 1 < args.len() => {
                 tcp_pull_addr = Some(format!("tcp://{}", args[i + 1]));
+                i += 2;
+            }
+            "--workers" if i + 1 < args.len() => {
+                num_workers = match args[i + 1].parse::<usize>() {
+                    Ok(n) if n > 0 && n <= 32 => n,
+                    _ => {
+                        eprintln!("Invalid number of workers: {} (must be 1-32)", args[i + 1]);
+                        print_usage_and_exit();
+                    }
+                };
                 i += 2;
             }
             _ => {
@@ -81,6 +94,7 @@ fn main() {
     info!("UDS Push Socket path : {}", push_uds_path);
     info!("Tcp Pull ip  : {}", tcp_pull_addr);
     info!("Tcp Push ip : {}", tcp_push_addr);
+    info!("Worker threads: {}", num_workers);
 
     let ip = local_ip_address::local_ip().unwrap();
 
@@ -97,88 +111,29 @@ fn main() {
         }
     }
 
-    let context = zmq::Context::new();
+    let context = Arc::new(zmq::Context::new());
+    
+    // Create channels for Atlas → Agave direction
+    let (atlas_sender, atlas_receiver): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = bounded(1000);
+    
+    // Create channels for Agave → Atlas direction
+    let (agave_sender, agave_receiver): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = bounded(1000);
 
-    // Creating zmq sockets for the Back channel
-    let uds_push_socket = context.socket(zmq::PUSH).unwrap();
-    uds_push_socket
-        .connect(&format!("ipc://{}", push_uds_path))
-        .unwrap();
-
+    // Atlas → Agave: Receiver thread
     let tcp_pull_socket = context.socket(zmq::XSUB).unwrap();
     tcp_pull_socket
         .connect(&tcp_pull_addr)
-        .expect("Failed to bind PUB socket");
-
+        .expect("Failed to connect XSUB socket");
     tcp_pull_socket.send(b"\x01" as &[u8], 0).unwrap();
-
-    // Starting atlas listener thread and Xandeum Agave Forwarder Thread
+    
+    let atlas_sender_clone = atlas_sender.clone();
     thread::spawn(move || {
-        info!("Starting Atlas Listener");
+        info!("Starting Atlas Receiver");
         loop {
             match tcp_pull_socket.recv_bytes(0) {
                 Ok(msg) => {
-                    debug!("Received Data from Atlas : {:?}", msg);
-
-                    // Extracting IP address from the Response buffer
-                    let (ip_prefix, req_bytes) = msg.split_at(16);
-                    let ip_address = if ip_prefix[4..] == [0; 12] {
-                        // It's IPv4
-                        IpAddr::V4(std::net::Ipv4Addr::new(
-                            ip_prefix[0],
-                            ip_prefix[1],
-                            ip_prefix[2],
-                            ip_prefix[3],
-                        ))
-                    } else {
-                        // It's IPv6
-                        let mut octets = [0u8; 16];
-                        octets.copy_from_slice(ip_prefix);
-                        IpAddr::V6(std::net::Ipv6Addr::from(octets))
-                    };
-
-                    // Checking if the The Response is for a RPC request or a transaction
-                    match ResponseWrapper::decode(req_bytes) {
-                        Ok(wrapper) => {
-                            let response = match wrapper.response {
-                                Some(ref resp) => resp.clone(),
-                                None => {
-                                    error!(
-                                        "Received empty Response in ResponseWrapper: id={}",
-                                        wrapper.id
-                                    );
-                                    continue;
-                                }
-                            };
-
-                            match response.response {
-                                // If the response is for a RPC request and it is not originated from these docks/rpc
-                                // the it should be discarded.Since Each RPC will have their own Request counter
-                                // Request originated from other RPC will have different request number which could be
-                                // higher from this rpc. If the response for that request is stored in this rpc then
-                                // it will act as a poison response and it will provide false results in the future
-                                // for that request number
-                                Some(Response::Exists(_))
-                                | Some(Response::ListDir(_))
-                                | Some(Response::Metadata(_)) => {
-                                    if ip != ip_address {
-                                        info!("Received a RPC request originated from different RPC, discarding");
-                                        continue;
-                                    }
-                                }
-                                Some(Response::Tx(_)) => {}
-                                None => {}
-                            }
-                        }
-                        Err(e) => {
-                            error!("Failed to decode ResponseWrapper: {:?}", e);
-                            debug!("Raw message: {:?}", msg);
-                        }
-                    }
-
-                    match uds_push_socket.send(req_bytes, 0) {
-                        Ok(()) => debug!("Forwarded data from Atlas to UDS PUSH socket"),
-                        Err(e) => error!("Failed to forward to UDS PUSH socket: {:?}", e),
+                    if let Err(e) = atlas_sender_clone.send(msg) {
+                        error!("Failed to send to Atlas channel: {:?}", e);
                     }
                 }
                 Err(e) => {
@@ -188,68 +143,190 @@ fn main() {
         }
     });
 
-    // Creating sockets To receive from Xandeum Agave And to send to Atlas
+    // Atlas → Agave: Worker threads
+    for worker_id in 0..num_workers {
+        let atlas_receiver_clone = atlas_receiver.clone();
+        let context_clone = Arc::clone(&context);
+        let ip_clone = ip.clone();
+        let push_uds_path_clone = push_uds_path.to_string();
+        
+        thread::spawn(move || {
+            info!("Starting Atlas → Agave worker {}", worker_id);
+            
+            // Each worker has its own UDS push socket
+            let uds_push_socket = context_clone.socket(zmq::PUSH).unwrap();
+            uds_push_socket
+                .connect(&format!("ipc://{}", push_uds_path_clone))
+                .unwrap();
+            
+            loop {
+                match atlas_receiver_clone.recv() {
+                    Ok(msg) => {
+                        debug!("Worker {} processing Atlas message", worker_id);
+                        
+                        // Extracting IP address from the Response buffer
+                        let (ip_prefix, req_bytes) = msg.split_at(16);
+                        let ip_address = if ip_prefix[4..] == [0; 12] {
+                            IpAddr::V4(std::net::Ipv4Addr::new(
+                                ip_prefix[0],
+                                ip_prefix[1],
+                                ip_prefix[2],
+                                ip_prefix[3],
+                            ))
+                        } else {
+                            let mut octets = [0u8; 16];
+                            octets.copy_from_slice(ip_prefix);
+                            IpAddr::V6(std::net::Ipv6Addr::from(octets))
+                        };
+
+                        // Checking if the Response is for a RPC request or a transaction
+                        match ResponseWrapper::decode(req_bytes) {
+                            Ok(wrapper) => {
+                                let response = match wrapper.response {
+                                    Some(ref resp) => resp.clone(),
+                                    None => {
+                                        error!(
+                                            "Worker {}: Received empty Response in ResponseWrapper: id={}",
+                                            worker_id, wrapper.id
+                                        );
+                                        continue;
+                                    }
+                                };
+
+                                match response.response {
+                                    Some(Response::Exists(_))
+                                    | Some(Response::ListDir(_))
+                                    | Some(Response::Metadata(_)) => {
+                                        if ip_clone != ip_address {
+                                            info!("Worker {}: Received RPC request from different RPC, discarding", worker_id);
+                                            continue;
+                                        }
+                                    }
+                                    Some(Response::Tx(_)) => {}
+                                    None => {}
+                                }
+                            }
+                            Err(e) => {
+                                error!("Worker {}: Failed to decode ResponseWrapper: {:?}", worker_id, e);
+                                debug!("Worker {}: Raw message: {:?}", worker_id, msg);
+                            }
+                        }
+
+                        match uds_push_socket.send(req_bytes, 0) {
+                            Ok(()) => debug!("Worker {}: Forwarded data to UDS PUSH socket", worker_id),
+                            Err(e) => error!("Worker {}: Failed to forward to UDS PUSH socket: {:?}", worker_id, e),
+                        }
+                    }
+                    Err(e) => {
+                        error!("Worker {}: Channel receive error: {:?}", worker_id, e);
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    // Agave → Atlas: Receiver thread
     let uds_pull_socket = context.socket(zmq::PULL).unwrap();
     uds_pull_socket
         .connect(&format!("ipc://{}", pull_uds_path))
         .unwrap();
-
-    let tcp_push_socket = context.socket(zmq::PUSH).unwrap();
-    tcp_push_socket
-        .connect(&tcp_push_addr)
-        .expect("Failed to bind PUB socket");
-
-    // Listening to Xandeum agave for incoming Xtransactions and forwarding
-    // them to Atlas
-    loop {
-        match uds_pull_socket.recv_bytes(0) {
-            Ok(msg) => {
-                let reqs = deserialize_requests(msg);
-
-                info!("Request Received : {:?} ", reqs);
-
-                if reqs.is_empty() {
-                    warn!("No request Found, Skipping");
+    
+    let agave_sender_clone = agave_sender.clone();
+    thread::spawn(move || {
+        info!("Starting Agave Receiver");
+        loop {
+            match uds_pull_socket.recv_bytes(0) {
+                Ok(msg) => {
+                    if let Err(e) = agave_sender_clone.send(msg) {
+                        error!("Failed to send to Agave channel: {:?}", e);
+                    }
                 }
+                Err(zmq::Error::EAGAIN) => {
+                    // Non-blocking receive, continue
+                    thread::yield_now();
+                }
+                Err(e) => {
+                    error!("Error receiving from Agave: {:?}", e);
+                }
+            }
+        }
+    });
 
-                for req in reqs {
-                    let mut buf = Vec::new();
-                    req.encode(&mut buf).unwrap();
-
-                    // Encoding first 16 bytes id buffer with Ipaddress so When it receives
-                    // Response from Atlas We Receive The IP.
-                    // This is needed For identifying RPC requests and their responses
-                    // If the RPC request is originated from These Docks/RPC Then and only then
-                    // It's response should be sent to the RPC else discarded
-
-                    let mut final_buf = Vec::with_capacity(16 + buf.len());
-                    final_buf.extend_from_slice(&ip_bytes);
-                    final_buf.extend_from_slice(&buf);
-
-                    let res = tcp_push_socket.send(&final_buf, 0);
-
-                    match res {
-                        Ok(()) => {
-                            debug!("Sent a request : {:?}", req);
+    // Agave → Atlas: Worker threads
+    for worker_id in 0..num_workers {
+        let agave_receiver_clone = agave_receiver.clone();
+        let context_clone = Arc::clone(&context);
+        let ip_bytes_clone = ip_bytes.clone();
+        let tcp_push_addr_clone = tcp_push_addr.clone();
+        
+        thread::spawn(move || {
+            info!("Starting Agave → Atlas worker {}", worker_id);
+            
+            // Each worker has its own TCP push socket
+            let tcp_push_socket = context_clone.socket(zmq::PUSH).unwrap();
+            tcp_push_socket
+                .connect(&tcp_push_addr_clone)
+                .expect("Failed to connect PUSH socket");
+            
+            loop {
+                match agave_receiver_clone.recv() {
+                    Ok(msg) => {
+                        debug!("Worker {} processing Agave message", worker_id);
+                        
+                        let reqs = deserialize_requests(msg);
+                        
+                        if reqs.is_empty() {
+                            warn!("Worker {}: No request found, skipping", worker_id);
+                            continue;
                         }
-                        Err(e) => {
-                            error!("Error Sending Req , Error : {}", e);
+                        
+                        // Process multiple requests in batch
+                        for req in reqs {
+                            let mut buf = Vec::new();
+                            req.encode(&mut buf).unwrap();
+                            
+                            let mut final_buf = Vec::with_capacity(16 + buf.len());
+                            final_buf.extend_from_slice(&ip_bytes_clone);
+                            final_buf.extend_from_slice(&buf);
+                            
+                            match tcp_push_socket.send(&final_buf, 0) {
+                                Ok(()) => {
+                                    debug!("Worker {}: Sent request: {:?}", worker_id, req);
+                                }
+                                Err(e) => {
+                                    error!("Worker {}: Error sending request: {}", worker_id, e);
+                                }
+                            }
                         }
+                    }
+                    Err(e) => {
+                        error!("Worker {}: Channel receive error: {:?}", worker_id, e);
+                        break;
                     }
                 }
             }
-            Err(zmq::Error::EAGAIN) => {
-                info!("No Message Received");
-                sleep(Duration::from_millis(100));
-            }
-            Err(e) => {
-                error!(
-                    "Error occurred While Receiving Packets through UDS in zmq, Error : {:?}",
-                    e
-                );
-            }
-        }
+        });
     }
+    
+    // Set up signal handling for graceful shutdown
+    let running = Arc::new(AtomicBool::new(true));
+    let r = running.clone();
+    
+    ctrlc::set_handler(move || {
+        info!("Received shutdown signal, stopping...");
+        r.store(false, Ordering::SeqCst);
+    }).expect("Error setting Ctrl-C handler");
+    
+    // Keep main thread alive and monitor shutdown signal
+    while running.load(Ordering::SeqCst) {
+        thread::sleep(Duration::from_secs(1));
+    }
+    
+    info!("Shutting down gracefully...");
+    // Give workers time to finish current tasks
+    thread::sleep(Duration::from_secs(2));
+    info!("Shutdown complete");
 }
 
 /// To Validate and process the XTransaction to a Request format
@@ -336,7 +413,12 @@ fn process_tx_to_proto_structure(tx: VersionedTransaction) -> Result<Vec<Request
 }
 
 fn print_usage_and_exit() -> ! {
-    eprintln!("Usage: <binary> --version <vega|altair> --tcp-push <ip:port> --tcp-pull <ip:port>");
+    eprintln!("Usage: <binary> --version <vega|altair> --tcp-push <ip:port> --tcp-pull <ip:port> [--workers <1-32>]");
+    eprintln!("\nOptions:");
+    eprintln!("  --version     Version name (vega or altair)");
+    eprintln!("  --tcp-push    TCP address for pushing to Atlas");
+    eprintln!("  --tcp-pull    TCP address for pulling from Atlas");
+    eprintln!("  --workers     Number of worker threads (default: 4, max: 32)");
     std::process::exit(1);
 }
 
