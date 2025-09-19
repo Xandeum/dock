@@ -12,6 +12,9 @@ solana-sdk = "2.2.1"
 prost = "0.13.5"
 serde = { version = "1.0", features = ["derive"] }
 local-ip-address = "0.5"
+crossbeam-channel = "0.5"
+rayon = "1.10"
+ctrlc = "3.4"
 
 [build-dependencies]
 prost-build = "0.13.5" 
