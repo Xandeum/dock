@@ -387,6 +387,7 @@ fn process_tx_to_proto_structure(tx: VersionedTransaction) -> Result<Vec<Request
                         9 => Opcode::Copy,
                         13 => Opcode::Move,
                         14 => Opcode::AssignCoowner,
+                        16 => Opcode::Find,
                         _ => {
                             warn!("Other Instructions are not supported yet, Skipping");
                             continue;
