@@ -192,6 +192,7 @@ fn main() {
                                         continue;
                                     }
                                 };
+                                info!("Received Response  : {:?}",response);
 
                                 match response.response {
                                     Some(Response::Exists(_))
@@ -372,8 +373,8 @@ fn process_tx_to_proto_structure(tx: VersionedTransaction) -> Result<Vec<Request
                 );
                 continue;
             }
-            match ix.data.get(1) {
-                Some(op) => {
+            match ix.data.split_first() {
+                Some((op, data)) => {
                     let opcode = match op {
                         0 => Opcode::Bigbang,
                         1 => Opcode::Armageddon,
@@ -393,7 +394,6 @@ fn process_tx_to_proto_structure(tx: VersionedTransaction) -> Result<Vec<Request
                             continue;
                         }
                     };
-                    let data = &ix.data[2..];
                     let req = Request {
                         op: opcode as i32,
                         pubkey: signers[0].to_bytes().to_vec(),
