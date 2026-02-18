@@ -272,7 +272,7 @@ fn main() {
             loop {
                 match agave_receiver_clone.recv() {
                     Ok(msg) => {
-                        debug!("Worker {} processing Agave message", worker_id);
+                        info!("Worker {} processing Agave message", worker_id);
                         
                         let reqs = deserialize_requests(msg);
                         
@@ -292,7 +292,7 @@ fn main() {
                             
                             match tcp_push_socket.send(&final_buf, 0) {
                                 Ok(()) => {
-                                    debug!("Worker {}: Sent request: {:?}", worker_id, req);
+                                    info!("Worker {}: Sent request: {:?}", worker_id, req);
                                 }
                                 Err(e) => {
                                     error!("Worker {}: Error sending request: {}", worker_id, e);
@@ -334,7 +334,7 @@ fn process_tx_to_proto_structure(tx: VersionedTransaction) -> Result<Vec<Request
     let mut reqs: Vec<Request> = Vec::new();
     let sanitized_tx = SanitizedVersionedTransaction::try_new(tx.clone())?;
 
-    debug!("Sanitized Transaction : {:?}", sanitized_tx);
+    info!("Sanitized Transaction : {:?}", sanitized_tx);
     let msg = sanitized_tx.get_message();
 
     let tx_hash = tx
@@ -372,8 +372,8 @@ fn process_tx_to_proto_structure(tx: VersionedTransaction) -> Result<Vec<Request
                 );
                 continue;
             }
-            match ix.data.split_first() {
-                Some((op, data)) => {
+            match ix.data.get(1) {
+                Some(op) => {
                     let opcode = match op {
                         0 => Opcode::Bigbang,
                         1 => Opcode::Armageddon,
@@ -393,6 +393,7 @@ fn process_tx_to_proto_structure(tx: VersionedTransaction) -> Result<Vec<Request
                             continue;
                         }
                     };
+                    let data = &ix.data[2..];
                     let req = Request {
                         op: opcode as i32,
                         pubkey: signers[0].to_bytes().to_vec(),
