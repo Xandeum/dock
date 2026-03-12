@@ -202,7 +202,11 @@ fn main() {
                                             continue;
                                         }
                                     }
-                                    Some(Response::Tx(_)) => {}
+                                    Some(Response::Tx(res)) => {
+                                         if res.status == protos::Status::Processing as i32 {
+                                            continue; 
+                                        }
+                                    }
                                     None => {}
                                 }
                             }
