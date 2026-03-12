@@ -13,9 +13,9 @@ use std::sync::{
     Arc,
 };
 use std::{env, net::IpAddr, thread};
-use std::{str::FromStr, thread::sleep, time::Duration};
+use std::{str::FromStr, time::Duration};
 
-use crate::protos::{response::Response, ResponseWrapper};
+use crate::protos::{ResponseWrapper, Status, response::Response};
 
 pub mod logger;
 
@@ -23,7 +23,7 @@ mod protos {
     include!(concat!(env!("OUT_DIR"), "/_.rs"));
 }
 
-const XAND_SHILED_KEY: &str = "EaLDF7m76kzvrpeADHVHPLfk5qpPaPxYUYqYApByLp1S";
+const XAND_SHILED_KEY: &str = "GH4eE2Wuzd2cFHQgXDp4avGLA3cEiNwEBVhkGkP8Vrs3";
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -206,7 +206,11 @@ fn main() {
                                             continue;
                                         }
                                     }
-                                    Some(Response::Tx(_)) => {}
+                                    Some(Response::Tx(res)) => {
+                                        if res.status == Status::Processing as i32{
+                                            continue;
+                                        }
+                                    }
                                     None => {}
                                 }
                             }
