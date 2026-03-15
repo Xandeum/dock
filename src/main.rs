@@ -23,7 +23,7 @@ mod protos {
     include!(concat!(env!("OUT_DIR"), "/_.rs"));
 }
 
-const XAND_SHILED_KEY: &str = "GH4eE2Wuzd2cFHQgXDp4avGLA3cEiNwEBVhkGkP8Vrs3";
+const XAND_SHILED_KEY: &str = "xSHLJPXU8QW3A9kGiRoL94bksJ7ZZPY4dUwJPAT8CVK";
 
 fn main() {
     let args: Vec<String> = env::args().collect();
