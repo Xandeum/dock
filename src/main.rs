@@ -1,3 +1,4 @@
+use crossbeam_channel::{bounded, Receiver, Sender};
 use log::{debug, error, info, warn};
 use logger::init_logger;
 use prost::Message;
@@ -7,12 +8,14 @@ use solana_sdk::{
     sanitize::SanitizeError,
     transaction::{SanitizedVersionedTransaction, VersionedTransaction},
 };
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::{env, net::IpAddr, thread};
-use std::{str::FromStr, thread::sleep, time::Duration};
-use crossbeam_channel::{bounded, Receiver, Sender};
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::{str::FromStr, time::Duration};
 
-use crate::protos::{response::Response, ResponseWrapper};
+use crate::protos::{ResponseWrapper, Status, response::Response};
 
 pub mod logger;
 
@@ -112,10 +115,10 @@ fn main() {
     }
 
     let context = Arc::new(zmq::Context::new());
-    
+
     // Create channels for Atlas → Agave direction
     let (atlas_sender, atlas_receiver): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = bounded(1000);
-    
+
     // Create channels for Agave → Atlas direction
     let (agave_sender, agave_receiver): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = bounded(1000);
 
@@ -125,7 +128,7 @@ fn main() {
         .connect(&tcp_pull_addr)
         .expect("Failed to connect XSUB socket");
     tcp_pull_socket.send(b"\x01" as &[u8], 0).unwrap();
-    
+
     let atlas_sender_clone = atlas_sender.clone();
     thread::spawn(move || {
         info!("Starting Atlas Receiver");
@@ -149,21 +152,21 @@ fn main() {
         let context_clone = Arc::clone(&context);
         let ip_clone = ip.clone();
         let push_uds_path_clone = push_uds_path.to_string();
-        
+
         thread::spawn(move || {
             info!("Starting Atlas → Agave worker {}", worker_id);
-            
+
             // Each worker has its own UDS push socket
             let uds_push_socket = context_clone.socket(zmq::PUSH).unwrap();
             uds_push_socket
                 .connect(&format!("ipc://{}", push_uds_path_clone))
                 .unwrap();
-            
+
             loop {
                 match atlas_receiver_clone.recv() {
                     Ok(msg) => {
                         debug!("Worker {} processing Atlas message", worker_id);
-                        
+
                         // Extracting IP address from the Response buffer
                         let (ip_prefix, req_bytes) = msg.split_at(16);
                         let ip_address = if ip_prefix[4..] == [0; 12] {
@@ -192,6 +195,7 @@ fn main() {
                                         continue;
                                     }
                                 };
+                                info!("Received Response  : {:?}", response);
 
                                 match response.response {
                                     Some(Response::Exists(_))
@@ -203,22 +207,30 @@ fn main() {
                                         }
                                     }
                                     Some(Response::Tx(res)) => {
-                                         if res.status == protos::Status::Processing as i32 {
-                                            continue; 
+                                        if res.status == Status::Processing as i32{
+                                            continue;
                                         }
                                     }
                                     None => {}
                                 }
                             }
                             Err(e) => {
-                                error!("Worker {}: Failed to decode ResponseWrapper: {:?}", worker_id, e);
+                                error!(
+                                    "Worker {}: Failed to decode ResponseWrapper: {:?}",
+                                    worker_id, e
+                                );
                                 debug!("Worker {}: Raw message: {:?}", worker_id, msg);
                             }
                         }
 
                         match uds_push_socket.send(req_bytes, 0) {
-                            Ok(()) => debug!("Worker {}: Forwarded data to UDS PUSH socket", worker_id),
-                            Err(e) => error!("Worker {}: Failed to forward to UDS PUSH socket: {:?}", worker_id, e),
+                            Ok(()) => {
+                                debug!("Worker {}: Forwarded data to UDS PUSH socket", worker_id)
+                            }
+                            Err(e) => error!(
+                                "Worker {}: Failed to forward to UDS PUSH socket: {:?}",
+                                worker_id, e
+                            ),
                         }
                     }
                     Err(e) => {
@@ -235,7 +247,7 @@ fn main() {
     uds_pull_socket
         .connect(&format!("ipc://{}", pull_uds_path))
         .unwrap();
-    
+
     let agave_sender_clone = agave_sender.clone();
     thread::spawn(move || {
         info!("Starting Agave Receiver");
@@ -263,40 +275,40 @@ fn main() {
         let context_clone = Arc::clone(&context);
         let ip_bytes_clone = ip_bytes.clone();
         let tcp_push_addr_clone = tcp_push_addr.clone();
-        
+
         thread::spawn(move || {
             info!("Starting Agave → Atlas worker {}", worker_id);
-            
+
             // Each worker has its own TCP push socket
             let tcp_push_socket = context_clone.socket(zmq::PUSH).unwrap();
             tcp_push_socket
                 .connect(&tcp_push_addr_clone)
                 .expect("Failed to connect PUSH socket");
-            
+
             loop {
                 match agave_receiver_clone.recv() {
                     Ok(msg) => {
-                        debug!("Worker {} processing Agave message", worker_id);
-                        
+                        info!("Worker {} processing Agave message", worker_id);
+
                         let reqs = deserialize_requests(msg);
-                        
+
                         if reqs.is_empty() {
                             warn!("Worker {}: No request found, skipping", worker_id);
                             continue;
                         }
-                        
+
                         // Process multiple requests in batch
                         for req in reqs {
                             let mut buf = Vec::new();
                             req.encode(&mut buf).unwrap();
-                            
+
                             let mut final_buf = Vec::with_capacity(16 + buf.len());
                             final_buf.extend_from_slice(&ip_bytes_clone);
                             final_buf.extend_from_slice(&buf);
-                            
+
                             match tcp_push_socket.send(&final_buf, 0) {
                                 Ok(()) => {
-                                    debug!("Worker {}: Sent request: {:?}", worker_id, req);
+                                    info!("Worker {}: Sent request: {:?}", worker_id, req);
                                 }
                                 Err(e) => {
                                     error!("Worker {}: Error sending request: {}", worker_id, e);
@@ -312,21 +324,22 @@ fn main() {
             }
         });
     }
-    
+
     // Set up signal handling for graceful shutdown
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
-    
+
     ctrlc::set_handler(move || {
         info!("Received shutdown signal, stopping...");
         r.store(false, Ordering::SeqCst);
-    }).expect("Error setting Ctrl-C handler");
-    
+    })
+    .expect("Error setting Ctrl-C handler");
+
     // Keep main thread alive and monitor shutdown signal
     while running.load(Ordering::SeqCst) {
         thread::sleep(Duration::from_secs(1));
     }
-    
+
     info!("Shutting down gracefully...");
     // Give workers time to finish current tasks
     thread::sleep(Duration::from_secs(2));
@@ -338,7 +351,7 @@ fn process_tx_to_proto_structure(tx: VersionedTransaction) -> Result<Vec<Request
     let mut reqs: Vec<Request> = Vec::new();
     let sanitized_tx = SanitizedVersionedTransaction::try_new(tx.clone())?;
 
-    debug!("Sanitized Transaction : {:?}", sanitized_tx);
+    info!("Sanitized Transaction : {:?}", sanitized_tx);
     let msg = sanitized_tx.get_message();
 
     let tx_hash = tx
@@ -377,40 +390,51 @@ fn process_tx_to_proto_structure(tx: VersionedTransaction) -> Result<Vec<Request
                 continue;
             }
             match ix.data.split_first() {
-                Some((op, data)) => {
-                    let opcode = match op {
-                        0 => Opcode::Bigbang,
-                        1 => Opcode::Armageddon,
-                        2 => Opcode::Openrw,
-                        3 => Opcode::Peek,
-                        4 => Opcode::Poke,
-                        5 => Opcode::Rm,
-                        6 => Opcode::Mkdir,
-                        7 => Opcode::Rmdir,
-                        8 => Opcode::Rename,
-                        9 => Opcode::Copy,
-                        13 => Opcode::Move,
-                        14 => Opcode::AssignCoowner,
-                        16 => Opcode::Find,
-                        _ => {
-                            warn!("Other Instructions are not supported yet, Skipping");
+                Some((tx_op, rest)) => {
+                    if *tx_op != 0 {
+                        warn!("Not a storage instruction, Skipping");
+                        continue;
+                    }
+                    match rest.split_first() {
+                        Some((op, data)) => {
+                            let opcode = match op {
+                                0 => Opcode::Bigbang,
+                                1 => Opcode::Armageddon,
+                                2 => Opcode::Openrw,
+                                3 => Opcode::Peek,
+                                4 => Opcode::Poke,
+                                5 => Opcode::Rm,
+                                6 => Opcode::Mkdir,
+                                7 => Opcode::Rmdir,
+                                8 => Opcode::Rename,
+                                9 => Opcode::Copy,
+                                13 => Opcode::Move,
+                                14 => Opcode::AssignCoowner,
+                                16 => Opcode::Find,
+                                _ => {
+                                    warn!("Other Instructions are not supported yet, Skipping");
+                                    continue;
+                                }
+                            };
+                            let req = Request {
+                                op: opcode as i32,
+                                pubkey: signers[0].to_bytes().to_vec(),
+                                data: data.to_vec(),
+                                signature: tx_hash.clone(),
+                            };
+                            reqs.push(req);
+                        }
+                        None => {
+                            warn!(
+                                "Instruction {} has empty data, skipping request generation",
+                                i
+                            );
                             continue;
                         }
-                    };
-                    let req = Request {
-                        op: opcode as i32,
-                        pubkey: signers[0].to_bytes().to_vec(),
-                        data: data.to_vec(),
-                        signature: tx_hash.clone(),
-                    };
-                    reqs.push(req);
+                    }
                 }
                 None => {
-                    warn!(
-                        "Instruction {} has empty data, skipping request generation",
-                        i
-                    );
-                    continue;
+                    warn!("Instruction {} has no data,skipping", i);
                 }
             }
         }
