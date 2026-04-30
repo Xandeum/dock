@@ -15,7 +15,7 @@ use std::sync::{
 use std::{env, net::IpAddr, thread};
 use std::{str::FromStr, time::Duration};
 
-use crate::protos::{ResponseWrapper, Status, response::Response};
+use crate::protos::{response::Response, ResponseWrapper, Status};
 
 pub mod logger;
 
@@ -207,7 +207,7 @@ fn main() {
                                         }
                                     }
                                     Some(Response::Tx(res)) => {
-                                        if res.status == Status::Processing as i32{
+                                        if res.status == Status::Processing as i32 {
                                             continue;
                                         }
                                     }
@@ -411,6 +411,8 @@ fn process_tx_to_proto_structure(tx: VersionedTransaction) -> Result<Vec<Request
                                 13 => Opcode::Move,
                                 14 => Opcode::AssignCoowner,
                                 16 => Opcode::Find,
+                                17 => Opcode::Bulkupload,
+                                18 => Opcode::Bulkpeek,
                                 _ => {
                                     warn!("Other Instructions are not supported yet, Skipping");
                                     continue;
@@ -422,6 +424,7 @@ fn process_tx_to_proto_structure(tx: VersionedTransaction) -> Result<Vec<Request
                                 data: data.to_vec(),
                                 signature: tx_hash.clone(),
                             };
+                            info!("Received Req : {:?}", req);
                             reqs.push(req);
                         }
                         None => {
