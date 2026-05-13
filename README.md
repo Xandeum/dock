@@ -1,8 +1,8 @@
-# Xandeum Dock Setup
+# Xandeum Dock Setup And Update
 
-Xandeum Dock connects the local RPC node to Atlas. It reads and writes Unix
-socket files under `/var/run/xandeum`, so that runtime directory must exist and
-be owned by the RPC service user before Dock starts.
+Xandeum Dock connects the local RPC node to Atlas. It uses Unix socket files
+under `/var/run/xandeum`, so that directory must exist and be owned by the RPC
+service user before Dock starts.
 
 ## Clone The Repository
 
@@ -11,35 +11,7 @@ git clone git@github.com:Xandeum/dock.git
 cd dock
 ```
 
-If you need HTTPS instead of SSH:
-
-```bash
-git clone https://github.com/Xandeum/dock.git
-cd dock
-```
-
-## Install Build Dependencies
-
-On Ubuntu or Debian:
-
-```bash
-sudo apt-get update
-sudo apt-get install -y build-essential git pkg-config libzmq3-dev protobuf-compiler
-```
-
-## Build Dock
-
-```bash
-cargo build --release
-```
-
-The release binary is created at:
-
-```bash
-target/release/xandeum-dock
-```
-
-## Create The Runtime Socket Directory
+## Create The Socket Directory
 
 Dock uses these socket paths:
 
@@ -49,62 +21,50 @@ Dock uses these socket paths:
 ```
 
 Create the directory and give ownership to the RPC service user so the RPC node
-can create the socket files. The included service files use `User=sol`; if your
-RPC runs as a different user, replace `sol:sol` with that user and group.
+can create the socket files.
+
+The included service files use `User=sol`. If your RPC runs as a different
+user, replace `sol:sol` with that user and group.
 
 ```bash
 sudo install -d -o sol -g sol -m 0755 /var/run/xandeum
 sudo chown -R sol:sol /var/run/xandeum
 ```
 
-Start the RPC node first so it can create the socket files, then start Dock:
+Start the RPC node first so it can create the socket files. Then check that the
+files exist:
 
 ```bash
-sudo systemctl start <rpc-service>.service
 sudo ls -la /var/run/xandeum
 ```
-
-Replace `<rpc-service>.service` with the actual RPC or validator service name.
 
 ## Choose The Atlas Cluster
 
 Update the `ExecStart` line in `vega.service` and `altair.service` for the
 cluster you are running.
 
-Use Devnet Atlas:
+Devnet:
 
 ```ini
 ExecStart=/usr/bin/xandeum-dock --version vega --tcp-push atlas.devnet.xandeum.com:3001 --tcp-pull atlas.devnet.xandeum.com:4001
 ExecStart=/usr/bin/xandeum-dock --version altair --tcp-push atlas.devnet.xandeum.com:3001 --tcp-pull atlas.devnet.xandeum.com:4001
 ```
 
-Use Trynet Atlas:
+For other clusters, use the matching Atlas host in both service files:
 
-```ini
-ExecStart=/usr/bin/xandeum-dock --version vega --tcp-push atlas.trynet.xandeum.com:3001 --tcp-pull atlas.trynet.xandeum.com:4001
-ExecStart=/usr/bin/xandeum-dock --version altair --tcp-push atlas.trynet.xandeum.com:3001 --tcp-pull atlas.trynet.xandeum.com:4001
+```text
+atlas.devnet.xandeum.com
+atlas.trynet.xandeum.com
+atlas.mainnet.xandeum.com
 ```
 
-Use Mainnet Atlas:
-
-```ini
-ExecStart=/usr/bin/xandeum-dock --version vega --tcp-push atlas.mainnet.xandeum.com:3001 --tcp-pull atlas.mainnet.xandeum.com:4001
-ExecStart=/usr/bin/xandeum-dock --version altair --tcp-push atlas.mainnet.xandeum.com:3001 --tcp-pull atlas.mainnet.xandeum.com:4001
-```
-
-Use `atlas.devnet.xandeum.com`, `atlas.trynet.xandeum.com`, or
-`atlas.mainnet.xandeum.com` depending on your cluster. After editing the service
-files, run the update commands below.
+Keep the ports set to the values assigned for your cluster.
 
 ## Update, Build, And Install
 
-This script stops the Dock services, pulls the latest Dock changes, updates the
-latest protos submodule, builds the release binary, installs it to `/usr/bin`,
+Run this from inside the cloned `dock` repository. It pulls the latest Dock
+changes, updates the protos, builds the release binary, installs the binary,
 copies the systemd service files, reloads systemd, and restarts Dock.
-
-Run this from inside the cloned `dock` repository. This repo currently uses
-`master`; if your checkout uses `main`, run the script with
-`DOCK_BRANCH=main PROTO_BRANCH=main`.
 
 ```bash
 #!/bin/bash
@@ -116,12 +76,12 @@ sudo systemctl stop altair.service || true
 DOCK_BRANCH="${DOCK_BRANCH:-master}"
 PROTO_BRANCH="${PROTO_BRANCH:-master}"
 
-# Pull latest Dock changes from master or main.
+# Pull latest Dock changes.
 git fetch origin
 git switch "$DOCK_BRANCH" 2>/dev/null || git switch -c "$DOCK_BRANCH" --track "origin/$DOCK_BRANCH"
 git pull --ff-only origin "$DOCK_BRANCH"
 
-# Pull latest proto changes from master or main.
+# Pull latest proto changes.
 git submodule sync --recursive
 git submodule update --init --recursive
 git -C xandeum-protos fetch origin
